@@ -648,7 +648,6 @@ def main():
     glutInitWindowPosition(100, 50)
     glutCreateWindow(b"3D Pool")
 
-    glutIgnoreKeyRepeat(1)
     init()
     seed_balls()
 
