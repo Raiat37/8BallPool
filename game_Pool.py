@@ -646,7 +646,7 @@ def main():
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
     glutInitWindowSize(WIN_W, WIN_H)
     glutInitWindowPosition(100, 50)
-    glutCreateWindow(b"3D Pool")
+    glutCreateWindow(b"8BallPool")
 
     init()
     seed_balls()
