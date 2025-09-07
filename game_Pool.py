@@ -46,20 +46,30 @@ PENETRATION_PERCENT   = 0.8    # correct only 80% of the remaining overlap
 MIN_REL_SPEED_FOR_HIT = 0.02   # skip impulse if approach is basically zero
 
 
-# ====== Cue state & shooting (add below your other globals) ======
-cue_angle = 0.0        # yaw around Z (left/right), degrees
-cue_height = 0.0       # vertical offset of cue (up/down along Z), relative to ball center
-cue_length = 255.0     # stick length behind the ball (was 150 -> 150*1.7 => 255)
-cue_radius = 3.0       # stick thickness
-cue_gap = 1.0          # tiny gap from ball surface to avoid z-fighting
+# ====== Cue state (single source of truth) ======
+cue_angle   = 0.0          # initial yaw (points into table)
+cue_power   = 0.0            # charge amount (0..100)
+charging    = False          # charging with space held
+cue_velocity = [0.0, 0.0]    # cue ball XY velocity after strike
 
-cue_power = 0.0        # power accumulator while holding space
-charging = False
-cue_velocity = [0.0, 0.0]  # cue ball velocity in XY after strike
+cue_length  = 255.0          # stick length
+cue_radius  = 3.0            # stick thickness
+cue_gap     = 1.0            # tip gap from ball to avoid z-fighting
+
+# Butt (rear) vertical offset; start at lowest legal height (clear the cushion)
+cue_butt_z  = max(0.0, WALL_H + BALL_R)
+
+# Stroke dynamics
+PULL_MAX     = 80.0          # max pull-back while charging (visual)
+HIT_MAX      = 40.0          # forward push distance when striking (visual)
+cue_stroked  = False         # set on release until balls stop
+stroke_offset = 0.0          # forward offset after impact (visual)
+impact_base   = None         # (x,y,z) base position at impact for stick rendering
+
 
 
 # Potting Logic
-POT_THRESHOLD = POCKET_R - BALL_R * 0.9   # tighten if potting feels too easy
+POT_THRESHOLD = POCKET_R - BALL_R * 1.2   # tighten if potting feels too easy
 
 
 # --- Game state ---
@@ -310,43 +320,77 @@ def draw_hud():
 
 # ================= Cue Stick Mechanics =================
 
-cue_angle = 0.0        # angle around cue ball
-cue_power = 0.0        # current power
-charging = False       # are we charging power?
-cue_velocity = [0.0, 0.0]  # velocity of cue ball after hit
-cue_butt_z = 0.0       # vertical offset of the butt (end away from ball)
-PULL_MAX = 80.0       # maximum pull-back while charging (world units)
-HIT_MAX = 40.0        # maximum forward push on hit (how far cue moves forward when striking)
-cue_stroked = False   # set after releasing space until ball stops
-stroke_offset = 0.0   # how far forward the cue is after striking (positive)
-impact_base = None    # fixed world (x,y,z) position of cue base at impact
+# cue_angle = 0.0        # angle around cue ball
+# cue_power = 0.0        # current power
+# charging = False       # are we charging power?
+# cue_velocity = [0.0, 0.0]  # velocity of cue ball after hit
+# cue_butt_z = 0.0       # vertical offset of the butt (end away from ball)
+# PULL_MAX = 80.0       # maximum pull-back while charging (world units)
+# HIT_MAX = 40.0        # maximum forward push on hit (how far cue moves forward when striking)
+# cue_stroked = False   # set after releasing space until ball stops
+# stroke_offset = 0.0   # how far forward the cue is after striking (positive)
+# impact_base = None    # fixed world (x,y,z) position of cue base at impact
+
+def cue_limits(cx, cy, angle_deg):
+    dx = math.cos(math.radians(angle_deg))
+    dy = math.sin(math.radians(angle_deg))
+
+    # butt goes opposite aim
+    ux, uy = -dx, -dy
+
+    # distance to wall behind the ball
+    t_candidates = []
+    if abs(ux) > EPS:
+        t_candidates += [( -HALF_X - cx) / ux, ( HALF_X - cx) / ux]
+    if abs(uy) > EPS:
+        t_candidates += [( -HALF_Y - cy) / uy, ( HALF_Y - cy) / uy]
+
+    t_candidates = [t for t in t_candidates if t > 0]
+    t_hit = min(t_candidates) if t_candidates else float('inf')
+
+    # minimum butt height needed to clear wall
+    if not math.isfinite(t_hit) or t_hit >= cue_length:
+        min_z = 0.0
+    else:
+        need = WALL_H + BALL_R
+        min_z = need * (cue_length / max(t_hit, EPS))
+
+    # global max tilt = 10° above horizontal
+    max_z = math.tan(math.radians(10.0)) * cue_length
+    return min_z, max_z
+
+
+
 
 def draw_cue():
-    """Draw the cue stick as a two-segment tapered cylinder behind the cue ball."""
     if not balls:
         return
     try:
-        cue_ball = balls[-1]["pos"]
-        cx, cy, cz = cue_ball
+        # current cue ball position and angle
+        cx, cy, cz = balls[-1]["pos"]
+        ang = cue_angle
 
-        # stick length and default offset behind cue ball
+        # dynamic limits (butt must clear the wall behind the ball along -angle)
+        min_z, max_z = cue_limits(cx, cy, ang)
+
+        # clamp global butt height
+        global cue_butt_z
+        if cue_butt_z < min_z: cue_butt_z = min_z
+        if cue_butt_z > max_z: cue_butt_z = max_z
+
+        # --- your existing draw code follows ---
         length = cue_length
-        offset = BALL_R + 5
+        offset = BALL_R + cue_gap
 
-        # front/back radii: front (touching cue) smaller, back slightly bigger
         r_front = cue_radius * 0.7
-        r_back = cue_radius * 1.3
-        # segment lengths: front 3/4 (current colour), back 1/4 (brown)
+        r_back  = cue_radius * 1.3
         L1 = length * 0.75
         L2 = length - L1
-        # radius at segment boundary (interpolated)
         r_mid = r_front + (r_back - r_front) * 0.75
 
-        # direction from angle
-        dx = math.cos(math.radians(cue_angle))
-        dy = math.sin(math.radians(cue_angle))
+        dx = math.cos(math.radians(ang))
+        dy = math.sin(math.radians(ang))
 
-        # compute dynamic offset
         if charging:
             pull_back = (cue_power / 100.0) * PULL_MAX
             current_offset = offset + pull_back
@@ -366,21 +410,14 @@ def draw_cue():
             base_y = cy - dy * current_offset
             base_z = cz
 
-        # Build local orientation
+        # Orientation vector (butt offset is vertical component)
         raw_x = -dx * length
         raw_y = -dy * length
         raw_z = cue_butt_z
-        mag = math.sqrt(raw_x*raw_x + raw_y*raw_y + raw_z*raw_z)
-        if mag == 0.0:
-            mag = 1e-6
-        v_x = raw_x / mag
-        v_y = raw_y / mag
-        v_z = raw_z / mag
-        axis_x = -v_y
-        axis_y = v_x
-        axis_z = 0.0
-        v_z_clamped = max(-1.0, min(1.0, v_z))
-        angle_deg = math.degrees(math.acos(v_z_clamped))
+        mag = math.sqrt(raw_x*raw_x + raw_y*raw_y + raw_z*raw_z) or 1e-6
+        v_x, v_y, v_z = raw_x/mag, raw_y/mag, raw_z/mag
+        axis_x, axis_y, axis_z = -v_y, v_x, 0.0
+        angle_deg = math.degrees(math.acos(max(-1.0, min(1.0, v_z))))
 
         glPushMatrix()
         glTranslatef(base_x, base_y, base_z)
@@ -388,15 +425,9 @@ def draw_cue():
             glRotatef(angle_deg, axis_x, axis_y, axis_z)
 
         quad = gluNewQuadric()
-        # front segment (3/4) - wood color
-        glColor3f(0.8, 0.6, 0.3)
-        gluCylinder(quad, r_front, r_mid, L1, 12, 1)
-        # move to back segment start
+        glColor3f(0.8, 0.6, 0.3); gluCylinder(quad, r_front, r_mid, L1, 12, 1)
         glTranslatef(0.0, 0.0, L1)
-        # back segment (1/4) - brown
-        glColor3f(0.35, 0.18, 0.05)
-        gluCylinder(quad, r_mid, r_back, L2, 12, 1)
-
+        glColor3f(0.35, 0.18, 0.05); gluCylinder(quad, r_mid, r_back, L2, 12, 1)
         glPopMatrix()
     except Exception:
         return
@@ -775,37 +806,28 @@ def update_physics():
             impact_base = None
 
 def keyboardListener(key, x, y):
-    """Handle rotation and shooting power."""
-    global cue_angle, cue_power, charging, cue_velocity, cue_butt_z, game_state 
-
+    global cue_angle, cue_power, charging, cue_velocity, cue_butt_z, game_state
     if key == b'r':
-        reset_game()
-        return
-    
+        reset_game(); return
     if game_state != GAME_RUNNING:
         return
-    
-    if key == b'a':   # rotate left
-        cue_angle += 5.0
-    if key == b'd':   # rotate right
-        cue_angle -= 5.0
-    if key == b'w':   # raise butt end
-        # compute allowed range: not below top of wall, and not above 30deg from lowest
-        min_z = WALL_H - BALL_R
-        # lowest angle
-        min_angle = math.atan2(min_z, cue_length)
-        max_angle = min_angle + math.radians(30.0)
-        max_z = math.tan(max_angle) * cue_length
-        cue_butt_z += 4.0
-        cue_butt_z = min(cue_butt_z, max_z)
-    if key == b's':   # lower butt end
-        min_z = WALL_H - BALL_R
-        cue_butt_z -= 4.0
-        cue_butt_z = max(cue_butt_z, min_z)
-    if key == b' ':   # spacebar to charge
-        # only start charging if not already stroking (ball is moving)
-        if not cue_stroked:
-            charging = True
+
+    if key == b'a': cue_angle += 5.0
+    if key == b'd': cue_angle -= 5.0
+
+    if key in (b'w', b's'):
+        cx, cy, _ = balls[-1]["pos"]
+        ang = cue_angle
+        min_z, max_z = cue_limits(cx, cy, ang)
+        if key == b'w':
+            cue_butt_z = min(max_z, cue_butt_z + 4.0)
+        else:
+            cue_butt_z = max(min_z, cue_butt_z - 4.0)
+
+
+    if key == b' ' and not cue_stroked:
+        charging = True
+
 
 def keyboardUpListener(key, x, y):
     """Release spacebar to shoot."""
@@ -863,7 +885,7 @@ def main():
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)                
     glutInitWindowSize(WIN_W, WIN_H)
     glutInitWindowPosition(100, 50)
-    glutCreateWindow(b"3D Pool (no depth test, solid black pockets)")
+    glutCreateWindow(b"3D Pool")
 
     glutIgnoreKeyRepeat(1) 
     init()
